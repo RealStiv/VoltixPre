@@ -1,0 +1,91 @@
+
+import urllib.parse
+import aiohttp
+from py_yt import VideosSearch
+from pyrogram import filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, InputMediaPhoto
+
+HEROKU_API = "https://serveryotr-7b18f0d07210.herokuapp.com"
+dm_queues = {}
+
+@app.on_message(
+    filters.command(["play", "vplay", "cplay", "cvplay"], prefixes=["/", "!", "%", ",", "", ".", "@", "#"]) 
+    & filters.private 
+    & ~BANNED_USERS
+)
+async def play_dm_command(client, message):
+    if len(message.command) < 2:
+        return await message.reply_text("Bhai, koi gaane ka naam bhi toh likho! Jaise: /play najaa")
+    
+    user_id = message.from_user.id
+    query = message.text.split(None, 1)[1]
+    msg = await message.reply_text("🔎 **Searching...**")
+    
+    try:
+        results = VideosSearch(query, limit=1)
+        result = (await results.next())["result"][0]
+        
+        vidid = result["id"]
+        title_raw = result["title"]
+        duration = result.get("duration", "Unknown")
+        title = urllib.parse.quote(title_raw)
+        thumb = result["thumbnails"][0]["url"].split("?")[0]
+        
+        # Safe channel detail fetching
+        channel_info = result.get("channel") or {}
+        artist_raw = channel_info.get("name", "Unknown Artist")
+        artist = urllib.parse.quote(artist_raw)
+        
+        # Agar Queue empty hai (Pehla Gaana)
+        if user_id not in dm_queues or len(dm_queues[user_id]) == 0:
+            dm_queues[user_id] = [{"vidid": vidid, "title": title_raw}]
+            
+            web_player_url = f"https://yotrplaydm.vercel.app/?vidid={vidid}&title={title}&thumb={urllib.parse.quote(thumb)}&artist={artist}&uid={user_id}"
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎵 Open Web Player", web_app=WebAppInfo(url=web_player_url))]])
+            
+            caption = (
+                f"▷ **Nᴏᴡ Pʟᴀʏɪɴɢ**\n\n"
+                f"๏ **Tɪᴛʟᴇ :** {title_raw}\n"
+                f"๏ **Dᴜʀᴀᴛɪᴏɴ :** {duration} ᴍɪɴᴜᴛᴇs\n"
+                f"❖ **ᴘᴏᴡєʀєᴅ»** NexGen"
+            )
+            await msg.delete()
+            await message.reply_photo(photo=thumb, caption=caption, reply_markup=keyboard)
+            
+        # Agar gaana Queue me add ho raha hai
+        else:
+            dm_queues[user_id].append({"vidid": vidid, "title": title_raw})
+            position = len(dm_queues[user_id]) - 1
+            
+            # Heroku Server ko batao ki gaana add hua hai
+            song_data = {
+                "uid": str(user_id),
+                "song": {
+                    "vidid": vidid,
+                    "title": title_raw,
+                    "thumb": thumb,
+                    "artist": artist_raw
+                }
+            }
+            async with aiohttp.ClientSession() as session:
+                await session.post(f"{HEROKU_API}/queue/add", json=song_data)
+            
+            queue_text = (
+                f"▣ Aᴅᴅᴇᴅ Tᴏ Qᴜᴇᴜᴇ Aᴛ #{position}\n"
+                f"๏ Tɪᴛʟᴇ : {title_raw}\n"
+                f"๏ Dᴜʀᴀᴛɪᴏɴ : {duration} ᴍɪɴᴜᴛᴇs\n"
+                f"❖ ᴘᴏᴡєʀєᴅ» NexGen"
+            )
+            await msg.delete()
+            await message.reply_photo(photo=thumb, caption=queue_text)
+            
+    except Exception as e:
+        # Ab ye exact error batayega jisse hum fix kar sakenge!
+        error_msg = f"❌ Asli Error Aaya Hai:\n`{str(e)}`"
+        try:
+            await msg.edit_text(error_msg)
+        except:
+            await message.reply_text(error_msg)
+
+
+
