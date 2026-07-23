@@ -1,19 +1,23 @@
 # ============================================================
-# Smm Panel Bot
-# Author: learningbots79 (https://github.com/learningbots79) 
-# Support: https://t.me/LearningBotsCommunity
-# Channel: https://t.me/learning_bots
-# YouTube: https://youtube.com/@learning_bots
-# License: Open-source (keep credits, no resale)
+# CONEXIÓN DE TODOS LOS MÓDULOS
 # ============================================================
 
-from .start import register_start_handler
-from .services import register_services_handlers
+from .inicio import register_inicio_handlers
+from .servicios import register_servicios_handlers, sincronizar_desde_proveedor, actualizar_estados_pedidos
+from .recargas import register_recargas_handlers
+from .promos_niveles import register_promos_niveles_handlers
+from .administracion import register_administracion_handlers
 
-# ====================================================
-# Register all handlers
-# ====================================================
+async def tarea_sincronizacion_automatica():
+    await sincronizar_desde_proveedor()
+    await actualizar_estados_pedidos()
+
+async def tareas_mantenimiento():
+    pass
+
 def all_handlers(app):
-    register_start_handler(app)
-    register_services_handlers(app)
-    print("✅ Handlers loaded successfully!")
+    register_inicio_handlers(app)
+    register_servicios_handlers(app)
+    register_recargas_handlers(app)
+    register_promos_niveles_handlers(app)
+    register_administracion_handlers(app)
