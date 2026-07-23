@@ -31,12 +31,7 @@ SMM_SITE = {
     "api_url": os.getenv("SMM_API_URL"),         
     "api_key": os.getenv("SMM_API_KEY"),
     "api_url_secundario": os.getenv("SMM_API_URL_SECUNDARIO", ""),
-    "api_key_secundario": os.getenv("SMM_API_KEY_SECUNDARIO", ""),       
-    "services": {
-        "reaction": int(os.getenv("REACTION_SERVICE_ID", 0)),
-        "members": int(os.getenv("MEMBERS_SERVICE_ID", 0)),
-        "views": int(os.getenv("VIEWS_SERVICE_ID", 0))
-    }
+    "api_key_secundario": os.getenv("SMM_API_KEY_SECUNDARIO", "")
 }
 
 # ==================================================
@@ -48,9 +43,6 @@ DIAS_ELIMINAR_PEDIDOS = int(os.getenv("DIAS_ELIMINAR_PEDIDOS", 90))
 ENVIAR_RESPALDO_CADA__DIAS = int(os.getenv("ENVIAR_RESPALDO_CADA__DIAS", 7))
 ENLACE_TU_TIENDA = os.getenv("ENLACE_TU_TIENDA", "")
 MARGEN_GLOBAL = int(os.getenv("MARGEN_GLOBAL", 35))
-
-# ⏱️ TIEMPO DE SINCRONIZACIÓN - EN SEGUNDOS
-# Ejemplos: 3 min = 180 | 1 hora = 3600 | 3 días = 259200
 INTERVALO_SINCRONIZACION = int(os.getenv("INTERVALO_SINCRONIZACION", 259200))
 
 PALABRAS_PROHIBIDAS = [
@@ -62,19 +54,12 @@ PALABRAS_PROHIBIDAS = [
 # ==================================================
 def validate_config():
     missing = []
-
     required_vars = [
         "BOT_TOKEN", "MONGO_URI", "DB_NAME", "OWNER_ID",
-        "SMM_API_URL", "SMM_API_KEY",
-        "REACTION_SERVICE_ID", "MEMBERS_SERVICE_ID", "VIEWS_SERVICE_ID",
-        "ORDER_CHANNEL", "ENLACE_TU_TIENDA"
+        "SMM_API_URL", "SMM_API_KEY", "ORDER_CHANNEL", "ENLACE_TU_TIENDA"
     ]
-
     for var in required_vars:
         if not os.getenv(var):
             missing.append(var)
-
     if missing:
-        raise ValueError(
-            f"❌ Faltan variables en el archivo .env: {', '.join(missing)}"
-        )
+        raise ValueError(f"❌ Faltan variables: {', '.join(missing)}")
