@@ -22,7 +22,6 @@ app = Client(
 )
 
 async def iniciar_tareas_en_segundo_plano():
-    """Ejecuta procesos automáticos sin detener el bot"""
     print("⏳ Realizando sincronización inicial...")
     await tarea_sincronizacion_automatica()
     
@@ -36,7 +35,6 @@ async def main():
     all_handlers(app)
     print("✅ Bot está iniciando....")
     
-    # Cargar estructuras y configuración editable
     await db.iniciar_estructura_base()
     await db.iniciar_configuracion()
     
