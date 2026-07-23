@@ -219,3 +219,47 @@ async def guardar_fecha_sincronizacion(ultima: str, proxima: str):
         {"_id": "global"},
         {"$set": {"ultima_sincronizacion": ultima, "proxima_sincronizacion": proxima}}
     )
+# ====================== CONFIGURACIÓN EDITABLE ======================
+async def iniciar_configuracion():
+    conf = await configuracion.find_one({"_id": "global"})
+    if not conf:
+        inicio = {
+            "_id": "global",
+            "minimo_recarga": 50,
+            "maximo_recarga": 5000,
+            "metodos_pago": ["USDT TRC20", "Binance", "Transferencia"],
+            "datos_pago": {
+                "USDT TRC20": "Dirección: TU_DIRECCION",
+                "Binance": "Usuario: TU_CUENTA",
+                "Transferencia": "Banco: TU_BANCO / Cuenta: NUMERO"
+            },
+            "margen_global": 100,
+            "moneda": "USD",
+            "minimo_cantidad": 10,
+            "maximo_cantidad": 10000,
+            "estado": "activo"
+        }
+        await configuracion.insert_one(inicio)
+
+async def obtener_config():
+    conf = await configuracion.find_one({"_id": "global"})
+    return conf or {}
+
+async def actualizar_config(campo, valor):
+    await configuracion.update_one(
+        {"_id": "global"},
+        {"$set": {campo: valor}},
+        upsert=True
+    )
+
+async def agregar_metodo_pago(nombre, datos):
+    await configuracion.update_one(
+        {"_id": "global"},
+        {"$addToSet": {"metodos_pago": nombre}, "$set": {f"datos_pago.{nombre}": datos}}
+    )
+
+async def eliminar_metodo_pago(nombre):
+    await configuracion.update_one(
+        {"_id": "global"},
+        {"$pull": {"metodos_pago": nombre}, "$unset": {f"datos_pago.{nombre}": ""}}
+    )
