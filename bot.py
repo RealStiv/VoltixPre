@@ -8,9 +8,7 @@
 # ============================================================
 
 import logging
-import os
 import asyncio
-from datetime import datetime, timedelta
 import db
 from handlers import all_handlers, tarea_sincronizacion_automatica, tareas_mantenimiento
 from pyrogram import Client
@@ -37,6 +35,11 @@ async def iniciar_tareas_en_segundo_plano():
 async def main():
     all_handlers(app)
     print("✅ Bot está iniciando....")
+    
+    # Cargar estructuras y configuración editable
+    await db.iniciar_estructura_base()
+    await db.iniciar_configuracion()
+    
     await app.start()
     asyncio.create_task(iniciar_tareas_en_segundo_plano())
     print("🚀 Sistema operativo completo con funciones automáticas activas")
