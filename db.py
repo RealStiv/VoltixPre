@@ -1,265 +1,235 @@
 # ============================================================
-# Smm Panel Bot
+# Smm Panel Bot - Base de Datos
 # Author: learningbots79 (https://github.com/learningbots79) 
-# Support: https://t.me/LearningBotsCommunity
-# Channel: https://t.me/learning_bots
-# YouTube: https://youtube.com/@learning_bots
-# License: Open-source (keep credits, no resale)
 # ============================================================
 
-import logging
-import motor.motor_asyncio
-from config import MONGO_URI, DB_NAME, MARGEN_GLOBAL
+from pymongo import MongoClient
 from datetime import datetime, timedelta
+from bson.objectid import ObjectId
+from config import MONGO_URI, DB_NAME, REFERRER_BONUS
 
-logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(asctime)s - %(message)s')
+cliente = MongoClient(MONGO_URI)
+db = cliente[DB_NAME]
 
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
-db = client[DB_NAME]
-
-# ====================== COLECCIONES ======================
-users = db["users"]
-orders = db["orders"]
-activity = db["activity"]
-categories = db["categories"]
-services = db["services"]
-sorteos = db["sorteos"]
-plantillas = db["plantillas"]
-registro_cambios = db["registro_cambios"]
+# ---------- COLECCIONES ----------
+usuarios = db["usuarios"]
 configuracion = db["configuracion"]
+categorias = db["categorias"]
+servicios = db["servicios"]
+pedidos = db["pedidos"]
+recargas = db["recargas"]
+codigos_promo = db["codigos_promo"]
+niveles = db["niveles"]
+auditoria = db["auditoria"]
 
-# ====================== INICIO DE ESTRUCTURA ======================
+# ---------- INICIO Y CONFIGURACIÓN ----------
 async def iniciar_estructura_base():
-    """Crea los valores iniciales si no existen"""
-    conf = await configuracion.find_one({"_id": "global"})
-    if not conf:
-        await configuracion.insert_one({
-            "_id": "global",
-            "margen_global": MARGEN_GLOBAL,
-            "ultima_sincronizacion": None,
-            "proxima_sincronizacion": None,
-            "ultimo_respaldo_enviado": None,
-            "plantilla_factura": "RECIBO N°{factura}\nFecha: {fecha}\nServicio: {servicio}\nCantidad: {cantidad}\nTotal: {total} {moneda}\nGracias por tu compra.",
-            "ultimo_numero_factura": 0
-        })
+    if "usuarios" not in await db.list_collection_names():
+        await db.create_collection("usuarios")
+    await iniciar_configuracion()
 
-# ====================== FUNCIONES DE REGISTRO ======================
-async def log_accion(accion: str, detalle: str, autor: str = "Sistema"):
-    await registro_cambios.insert_one({
-        "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "accion": accion,
-        "detalle": detalle,
-        "realizado_por": autor
-    })
-
-async def log_activity(user_id: int, action: str):
-    await activity.insert_one({
-        "user_id": user_id,
-        "action": action,
-        "time": datetime.utcnow()
-    })
-
-# ====================== USUARIOS ======================
-async def user_exists(user_id: int) -> bool:
-    return await users.find_one({"_id": user_id}) is not None
-
-async def add_user(user_id: int, name: str, referred_by: int | None = None):
-    await users.update_one(
-        {"_id": user_id},
-        {"$setOnInsert": {
-            "_id": user_id,
-            "name": name,
-            "balance": 0,
-            "orders": 0,
-            "referred_by": referred_by,
-            "refs": 0,
-            "last_bonus": None,
-            "fecha_registro": datetime.now().strftime("%d/%m/%Y %H:%M"),
-            "total_gastado": 0,
-            "bloqueado": False,
-            "motivo_bloqueo": None,
-            "tiene_pedido_pendiente": False
-        }},
-        upsert=True
-    )
-
-async def bloquear_usuario(user_id: int, motivo: str):
-    await users.update_one(
-        {"_id": user_id},
-        {"$set": {"bloqueado": True, "motivo_bloqueo": motivo}}
-    )
-    await log_accion("Usuario bloqueado", f"ID: {user_id} | Motivo: {motivo}")
-
-async def desbloquear_usuario(user_id: int):
-    await users.update_one(
-        {"_id": user_id},
-        {"$set": {"bloqueado": False, "motivo_bloqueo": None}}
-    )
-    await log_accion("Usuario desbloqueado", f"ID: {user_id}")
-
-async def add_balance(user_id: int, amount: float):
-    await users.update_one(
-        {"_id": user_id},
-        {"$inc": {"balance": amount}},
-        upsert=True
-    )
-
-async def check_balance(user_id: int) -> float:
-    user = await users.find_one({"_id": user_id})
-    return user.get("balance", 0) if user else 0
-
-async def add_ref(user_id: int):
-    await users.update_one({"_id": user_id}, {"$inc": {"refs": 1}})
-
-async def get_referrals(user_id: int) -> int:
-    user = await users.find_one({"_id": user_id}, {"refs": 1})
-    return user.get("refs", 0) if user else 0
-
-async def total_users() -> int:
-    return await users.count_documents({})
-
-async def get_last_bonus(user_id: int):
-    user = await users.find_one({"_id": user_id}, {"last_bonus": 1})
-    return user.get("last_bonus") if user else None
-
-async def set_last_bonus(user_id: int):
-    await users.update_one(
-        {"_id": user_id},
-        {"$set": {"last_bonus": datetime.utcnow()}},
-        upsert=True
-    )
-
-async def actualizar_gasto_usuario(user_id: int, monto: float):
-    await users.update_one(
-        {"_id": user_id},
-        {"$inc": {"total_gastado": monto, "orders": 1}}
-    )
-
-async def estado_pedido_usuario(user_id: int, estado: bool):
-    await users.update_one(
-        {"_id": user_id},
-        {"$set": {"tiene_pedido_pendiente": estado}}
-    )
-
-# ====================== PEDIDOS ======================
-async def create_order(user_id: int, service_id: str, link: str, quantity: int, amount: float, costo: float, ganancia: float, api_order_id: int = None):
-    nuevo_pedido = {
-        "user_id": user_id,
-        "service_id": service_id,
-        "link": link,
-        "quantity": quantity,
-        "amount": amount,
-        "costo": costo,
-        "ganancia": ganancia,
-        "api_order_id": api_order_id,
-        "status": "pending",
-        "fecha": datetime.now().strftime("%d/%m/%Y %H:%M")
-    }
-    await orders.insert_one(nuevo_pedido)
-    await estado_pedido_usuario(user_id, True)
-    return nuevo_pedido
-
-async def update_order_status(api_order_id: int, new_status: str):
-    await orders.update_one({"api_order_id": api_order_id}, {"$set": {"status": new_status}})
-
-async def get_user_orders(user_id: int):
-    cursor = orders.find({"user_id": user_id}).sort("time", -1)
-    return await cursor.to_list(None)
-
-async def get_order_by_api(api_order_id: int):
-    return await orders.find_one({"api_order_id": api_order_id})
-
-async def limpiar_pedidos_antiguos(dias: int):
-    limite = datetime.now() - timedelta(days=dias)
-    resultado = await orders.delete_many({"fecha": {"$lt": limite.strftime("%d/%m/%Y %H:%M")}})
-    return resultado.deleted_count
-
-# ====================== SERVICIOS Y CATEGORÍAS ======================
-async def guardar_categoria(nombre: str):
-    existe = await categories.find_one({"nombre": nombre})
-    if not existe:
-        await categories.insert_one({
-            "nombre": nombre,
-            "descripcion": "",
-            "fecha_creacion": datetime.now().strftime("%d/%m/%Y %H:%M")
-        })
-        return True
-    return False
-
-async def guardar_servicio(datos_serv: dict):
-    existe = await services.find_one({"codigo": datos_serv["codigo"]})
-    if existe:
-        await services.update_one({"codigo": datos_serv["codigo"]}, {"$set": datos_serv})
-        return "actualizado"
-    else:
-        await services.insert_one(datos_serv)
-        return "nuevo"
-
-async def listar_categorias():
-    cursor = categories.find()
-    return await cursor.to_list(None)
-
-async def listar_servicios(filtro: dict = None):
-    filtro = filtro or {}
-    cursor = services.find(filtro).sort("nombre", 1)
-    return await cursor.to_list(None)
-
-async def sumar_vista_servicio(codigo: str):
-    await services.update_one({"codigo": codigo}, {"$inc": {"vistas": 1}})
-
-# ====================== FACTURAS Y CONFIGURACIÓN ======================
-async def obtener_siguiente_factura():
-    conf = await configuracion.find_one({"_id": "global"})
-    numero = conf.get("ultimo_numero_factura", 0) + 1
-    await configuracion.update_one({"_id": "global"}, {"$set": {"ultimo_numero_factura": numero}})
-    return numero
-
-async def guardar_fecha_sincronizacion(ultima: str, proxima: str):
-    await configuracion.update_one(
-        {"_id": "global"},
-        {"$set": {"ultima_sincronizacion": ultima, "proxima_sincronizacion": proxima}}
-    )
-# ====================== CONFIGURACIÓN EDITABLE ======================
 async def iniciar_configuracion():
     conf = await configuracion.find_one({"_id": "global"})
     if not conf:
         inicio = {
             "_id": "global",
-            "minimo_recarga": 50,
-            "maximo_recarga": 5000,
+            "modo_mantenimiento": False,
+            "moneda": "USD",
+            "margen_global": 100,
+            "recarga_minimo": 50,
+            "recarga_maximo": 5000,
+            "recarga_limite_diario": 10000,
             "metodos_pago": ["USDT TRC20", "Binance", "Transferencia"],
             "datos_pago": {
                 "USDT TRC20": "Dirección: TU_DIRECCION",
                 "Binance": "Usuario: TU_CUENTA",
                 "Transferencia": "Banco: TU_BANCO / Cuenta: NUMERO"
             },
-            "margen_global": 100,
-            "moneda": "USD",
-            "minimo_cantidad": 10,
-            "maximo_cantidad": 10000,
-            "estado": "activo"
+            "tiempo_espera_pedido": 2,
+            "admin_contacto": "tu_usuario_telegram"
         }
         await configuracion.insert_one(inicio)
 
 async def obtener_config():
-    conf = await configuracion.find_one({"_id": "global"})
-    return conf or {}
+    return await configuracion.find_one({"_id": "global"}) or {}
 
-async def actualizar_config(campo, valor):
-    await configuracion.update_one(
-        {"_id": "global"},
-        {"$set": {campo: valor}},
-        upsert=True
-    )
+async def actualizar_configuracion(campo, valor):
+    await configuracion.update_one({"_id": "global"}, {"$set": {campo: valor}}, upsert=True)
 
-async def agregar_metodo_pago(nombre, datos):
-    await configuracion.update_one(
-        {"_id": "global"},
-        {"$addToSet": {"metodos_pago": nombre}, "$set": {f"datos_pago.{nombre}": datos}}
-    )
+async def guardar_accion(accion, detalle, usuario=0):
+    await auditoria.insert_one({
+        "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "usuario": usuario,
+        "accion": accion,
+        "detalle": detalle
+    })
 
-async def eliminar_metodo_pago(nombre):
-    await configuracion.update_one(
-        {"_id": "global"},
-        {"$pull": {"metodos_pago": nombre}, "$unset": {f"datos_pago.{nombre}": ""}}
+# ---------- USUARIOS ----------
+async def existe_usuario(uid):
+    return await usuarios.count_documents({"_id": uid}) > 0
+
+async def crear_usuario(uid, nombre, invitador=None):
+    if await existe_usuario(uid): return
+    await usuarios.insert_one({
+        "_id": uid, "nombre": nombre, "saldo": 0, "gasto_total": 0,
+        "invitado_por": invitador, "fecha_registro": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "ultimo_bono": None, "bloqueado": False, "motivo_bloqueo": ""
+    })
+    if invitador and invitador != uid:
+        await sumar_saldo(invitador, REFERRER_BONUS, "Bono por referido")
+
+async def obtener_usuario(uid):
+    return await usuarios.find_one({"_id": uid})
+
+async def obtener_saldo(uid):
+    u = await usuarios.find_one({"_id": uid})
+    return u.get("saldo", 0) if u else 0
+
+async def sumar_saldo(uid, monto, motivo=""):
+    await usuarios.update_one({"_id": uid}, {"$inc": {"saldo": monto}})
+    if monto < 0:
+        await usuarios.update_one({"_id": uid}, {"$inc": {"gasto_total": abs(monto)}})
+    await guardar_accion("Movimiento saldo", f"Usuario {uid} | {monto} | {motivo}")
+
+async def ultimo_bono(uid):
+    u = await usuarios.find_one({"_id": uid})
+    return u.get("ultimo_bono") if u else None
+
+async def guardar_hora_bono(uid):
+    await usuarios.update_one({"_id": uid}, {"$set": {"ultimo_bono": datetime.now()}})
+
+async def cambiar_estado_bloqueo(uid, estado, motivo=""):
+    await usuarios.update_one({"_id": uid}, {"$set": {"bloqueado": estado, "motivo_bloqueo": motivo}})
+
+# ---------- SERVICIOS Y CATEGORIAS ----------
+async def guardar_categoria(nombre):
+    if await categorias.count_documents({"nombre": nombre}) == 0:
+        await categorias.insert_one({"nombre": nombre})
+        return True
+    return False
+
+async def listar_categorias_activas():
+    lista = await categorias.find().sort("nombre",1).to_list(None)
+    return [c["nombre"] for c in lista]
+
+async def guardar_o_actualizar_servicio(datos):
+    existe = await servicios.find_one({"codigo": datos["codigo"]})
+    if existe:
+        await servicios.update_one({"_id": existe["_id"]}, {"$set": datos})
+        return "actualizado"
+    await servicios.insert_one(datos)
+    return "nuevo"
+
+async def servicios_por_categoria(nombre):
+    return await servicios.find({"categoria": nombre, "estado":"Activo"}).sort("nombre",1).to_list(None)
+
+async def obtener_servicio(codigo):
+    return await servicios.find_one({"codigo": codigo})
+
+async def buscar_servicios(palabra):
+    return await servicios.find({
+        "nombre": {"$regex": palabra, "$options":"i"}, "estado":"Activo"
+    }).limit(10).to_list(None)
+
+# ---------- PEDIDOS ----------
+async def crear_pedido(datos):
+    await pedidos.insert_one(datos)
+
+async def pedidos_de_usuario(uid):
+    return await pedidos.find({"user_id": uid}).sort("fecha",-1).limit(8).to_list(None)
+
+async def obtener_pedidos_actualizar():
+    return await pedidos.find({"estado": {"$nin":["Completado","Cancelado"]}}).to_list(None)
+
+async def actualizar_estado_pedido(id_ped, estado):
+    await pedidos.update_one({"_id": ObjectId(id_ped)}, {"$set": {"estado": estado}})
+
+async def fecha_ultimo_pedido(uid):
+    p = await pedidos.find_one({"user_id": uid}, sort=[("fecha",-1)])
+    return datetime.strptime(p["fecha"], "%d/%m/%Y %H:%M") if p else None
+
+# ---------- RECARGAS ----------
+async def crear_solicitud_recarga(user_id, metodo, monto, comprobante_id):
+    nueva = {
+        "user_id": user_id, "metodo": metodo, "monto": monto,
+        "comprobante_id": comprobante_id, "estado": "PENDIENTE",
+        "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "revisado_por": None
+    }
+    await recargas.insert_one(nueva)
+    return nueva
+
+async def obtener_recarga_por_id(id_str):
+    return await recargas.find_one({"_id": ObjectId(id_str)})
+
+async def actualizar_estado_recarga(id_str, estado, revisado):
+    await recargas.update_one(
+        {"_id": ObjectId(id_str)},
+        {"$set": {"estado": estado, "revisado_por": revisado}}
     )
+    if estado == "APROBADO":
+        sol = await obtener_recarga_por_id(id_str)
+        await sumar_saldo(sol["user_id"], sol["monto"], "Recarga aprobada")
+
+async def total_recargas_hoy(uid, fecha):
+    lista = await recargas.find({"user_id": uid, "fecha": {"$regex": f"^{fecha}"}, "estado":"APROBADO"}).to_list(None)
+    return sum(r["monto"] for r in lista)
+
+async def listar_recargas(filtro):
+    return await recargas.find(filtro).sort("fecha",-1).to_list(None)
+
+# ---------- CÓDIGOS PROMO ----------
+async def crear_codigo_promo(datos):
+    await codigos_promo.insert_one(datos)
+
+async def obtener_codigos_activos():
+    return await codigos_promo.find({"estado":"ACTIVO"}).to_list(None)
+
+async def canjear_codigo(uid, codigo):
+    cod = await codigos_promo.find_one({"codigo": codigo, "estado":"ACTIVO"})
+    if not cod: return "no_existe"
+    ya_usado = await db.auditoria.count_documents({"accion":"Código usado", "detalle":f"{codigo} | {uid}"})
+    if ya_usado: return "ya_usado"
+    if cod["usado"] >= cod["max_usos"]: return "agotado"
+
+    await codigos_promo.update_one({"_id": cod["_id"]}, {"$inc": {"usado":1}})
+    await guardar_accion("Código usado", f"{codigo} | {uid}")
+
+    if cod["tipo"] == "saldo":
+        await sumar_saldo(uid, cod["valor"], f"Código {codigo}")
+        return "aplicado_saldo"
+    return "aplicado_desc"
+
+# ---------- NIVELES ----------
+async def guardar_nivel(datos):
+    await niveles.update_one({"nivel": datos["nivel"]}, {"$set": datos}, upsert=True)
+
+async def obtener_todos_niveles():
+    return await niveles.find().sort("nivel",1).to_list(None)
+
+# ---------- REPORTES Y OTROS ----------
+async def obtener_datos_reporte(desde):
+    fecha_texto = desde.strftime("%d/%m/%Y")
+    total_usu = await usuarios.count_documents({})
+    total_ped = await pedidos.count_documents({})
+    ing = await pedidos.aggregate([
+        {"$match": {"fecha": {"$regex": f"^{fecha_texto}"}}},
+        {"$group": {"_id":None, "total":{"$sum":"$monto"}}}
+    ]).to_list(None)
+    rec = await recargas.aggregate([
+        {"$match": {"estado":"APROBADO"}},
+        {"$group": {"_id":None, "total":{"$sum":"$monto"}}}
+    ]).to_list(None)
+    return {
+        "usuarios": total_usu,
+        "pedidos": total_ped,
+        "ingresos": ing[0]["total"] if ing else 0,
+        "recargas": rec[0]["total"] if rec else 0,
+        "ganancia": 0
+    }
+
+async def obtener_ultimas_acciones(cantidad=15):
+    return await auditoria.find().sort("fecha",-1).limit(cantidad).to_list(None)
+
+async def obtener_todo_coleccion(nombre):
+    return await db[nombre].find().to_list(None)
