@@ -10,21 +10,19 @@
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 import aiohttp
-from config import SMM_SITE, ORDER_CHANNEL
-from db import create_order, users
+from config import SMM_SITE, ORDER_CHANNEL, MARGEN_GLOBAL, MONEDA, PALABRAS_PROHIBIDAS, TIEMPO_ESPERA_PEDIDO
+from db import create_order, users, listar_categorias, listar_servicios, sumar_vista_servicio, estado_pedido_usuario, check_balance, actualizar_gasto_usuario, log_accion
 from datetime import datetime
 
-PROFIT_MULTIPLIER = 2  # User price will be API price * PROFIT_MULTIPLIER
-
 # ============================================================
-# Temporary order storage
+# Almacenamiento temporal
 # ============================================================
 def init_temp(app: Client):
     if not hasattr(app, "order_temp"):
         app.order_temp = {}
 
 # ============================================================
-# Helper - safely extract readable text (link/caption/entities)
+# Función auxiliar extraer texto
 # ============================================================
 def _extract_message_text(message: Message) -> str:
     if getattr(message, "text", None):
@@ -37,300 +35,269 @@ def _extract_message_text(message: Message) -> str:
                 return ent.url.strip()
     return ""
 
+def tiene_prohibido(texto: str) -> bool:
+    minus = texto.lower()
+    return any(p in minus for p in PALABRAS_PROHIBIDAS)
+
+def calcular_precio_final(costo: float) -> tuple[float, float]:
+    ganancia = costo * (MARGEN_GLOBAL / 100)
+    return round(costo + ganancia, 4), round(ganancia, 4)
+
 # ============================================================
-# Show main service menu
+# Traer servicios desde API
+# ============================================================
+async def fetch_all_services():
+    payload = {"key": SMM_SITE["api_key"], "action": "services"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(SMM_SITE["api_url"], data=payload, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                data = await resp.json()
+                if isinstance(data, list):
+                    return data
+                return []
+    except Exception as e:
+        print("❌ Error al obtener servicios:", e)
+        return []
+
+# ============================================================
+# Mostrar categorías
 # ============================================================
 async def cb_services(client: Client, callback: CallbackQuery):
-    text = "🛒 **Buy Services**\nChoose a category:"
-    btns = [
-        [InlineKeyboardButton("Reaction 😉", callback_data="service_reaction"),
-         InlineKeyboardButton("Members 👥", callback_data="service_members")],
-        [InlineKeyboardButton("Views 👁️", callback_data="service_views")],
-        [InlineKeyboardButton("Back 🔙", callback_data="cb_back")]
-    ]
+    text = f"🛒 **CATÁLOGO DE SERVICIOS**\nElige una categoría:"
+    categorias = await listar_categorias()
+    btns = []
+    for cat in categorias:
+        nombre = cat.get("nombre", "Sin nombre")
+        btns.append([InlineKeyboardButton(nombre, callback_data=f"cat_{nombre}")])
+    btns.append([InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu_principal")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(btns))
     await callback.answer()
 
 # ============================================================
-# Fetch packages from API
+# Mostrar servicios por categoría
 # ============================================================
-async def fetch_packages():
-    payload = {"key": SMM_SITE["api_key"], "action": "services"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(SMM_SITE["api_url"], data=payload) as resp:
-                return await resp.json()
-    except Exception as e:
-        print("Fetch Error:", e)
-        return []
+async def cb_ver_categoria(client: Client, callback: CallbackQuery):
+    cat_nombre = callback.data.replace("cat_", "", 1)
+    servicios = await listar_servicios({"categoria": cat_nombre, "estado": "Activo"})
+    if not servicios:
+        await callback.answer("❌ No hay servicios disponibles en esta categoría", show_alert=True)
+        return await cb_services(client, callback)
 
-# ============================================================
-# Select service
-# ============================================================
-async def cb_service_select(client: Client, callback: CallbackQuery):
-    init_temp(client)
-    data = callback.data
-    if not data.startswith("service_"):
-        return
-
-    service_name = data.split("_", 1)[1]
-    service_id = SMM_SITE["services"].get(service_name)
-    if not service_id:
-        await callback.answer("❌ Invalid service!", show_alert=True)
-        return
-
-    await callback.message.edit_text(f"📦 Fetching {service_name} packages...")
-    packages = await fetch_packages()
-    if not packages or not isinstance(packages, list):
-        await callback.message.edit_text(
-            f"❌ Failed to fetch {service_name} packages.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back 🔙", callback_data="cb_services")]])
-        )
-        return
-
-    available = [p for p in packages if p.get("service") == service_id]
-    if not available:
-        await callback.message.edit_text(
-            f"❌ No packages available for {service_name}.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back 🔙", callback_data="cb_services")]])
-        )
-        return
-
-    user_id = callback.from_user.id
-    client.order_temp.setdefault(user_id, {})
-    client.order_temp[user_id]["available_packages"] = available
-    client.order_temp[user_id]["available_for"] = service_name
-
+    text = f"📂 **{cat_nombre}**\nElige el servicio:"
     btns = []
-    for idx, pkg in enumerate(available):
-        pkg_name = pkg.get("name", "Package")
-        api_rate = float(pkg.get("rate", 0) or 0)
-        user_rate = api_rate * PROFIT_MULTIPLIER
-        # Save user_rate in package for later
-        pkg["rate_user"] = user_rate
-        pkg["rate_api"] = api_rate
-        btns.append([InlineKeyboardButton(
-            f"{pkg_name} - {user_rate:.4f} coins",
-            callback_data=f"order_{service_name}_{idx}"
-        )])
-    btns.append([InlineKeyboardButton("Back 🔙", callback_data="cb_services")])
-
-    await callback.message.edit_text(
-        f"📦 Packages for **{service_name.capitalize()}**:",
-        reply_markup=InlineKeyboardMarkup(btns)
-    )
+    for s in servicios:
+        codigo = s.get("codigo")
+        nombre = s.get("nombre", "Servicio")
+        precio = s.get("precio_1000", 0)
+        btns.append([InlineKeyboardButton(f"{nombre} | {precio:.4f} {MONEDA}/1k", callback_data=f"serv_{codigo}")])
+    btns.append([InlineKeyboardButton("🔙 Ver Categorías", callback_data="cb_services")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(btns))
     await callback.answer()
 
 # ============================================================
-# Start order package
+# Seleccionar servicio
 # ============================================================
-async def cb_order_package(client: Client, callback: CallbackQuery):
-    init_temp(client)
-    parts = callback.data.split("_")
-    if len(parts) < 3:
-        return await callback.answer("❌ Invalid selection.", show_alert=True)
+async def cb_seleccionar_servicio(client: Client, callback: CallbackQuery):
+    codigo = callback.data.replace("serv_", "", 1)
+    servicios = await listar_servicios({"codigo": codigo})
+    if not servicios:
+        await callback.answer("❌ Servicio no encontrado", show_alert=True)
+        return await cb_services(client, callback)
 
-    _, service_name, idx_str = parts
-    try:
-        pkg_idx = int(idx_str)
-    except ValueError:
-        return await callback.answer("❌ Invalid package index.", show_alert=True)
+    serv = servicios[0]
+    await sumar_vista_servicio(codigo)
+    minimo = serv.get("minimo", 10)
+    maximo = serv.get("maximo", 10000)
+    costo = serv.get("costo_1000", 0)
+    precio, ganancia = calcular_precio_final(costo)
 
-    user_id = callback.from_user.id
-    user_temp = client.order_temp.setdefault(user_id, {})
-    available = user_temp.get("available_packages")
-    available_for = user_temp.get("available_for")
-
-    if not available or available_for != service_name:
-        packages = await fetch_packages()
-        service_id = SMM_SITE["services"].get(service_name)
-        available = [p for p in packages if p.get("service") == service_id]
-        user_temp["available_packages"] = available
-        user_temp["available_for"] = service_name
-
-    if pkg_idx < 0 or pkg_idx >= len(available):
-        return await callback.answer("❌ Invalid package selected.", show_alert=True)
-
-    pkg = available[pkg_idx]
-
-    # Save selected package with user price
-    service_id = pkg.get("service") or pkg.get("id") or pkg.get("service_id") or 0
-    client.order_temp[user_id] = {
-        "service_id": int(service_id),
-        "service_name": service_name,
-        "package": pkg,
-        "rate_api": float(pkg.get("rate_api", 0)),
-        "rate_user": float(pkg.get("rate_user", 0)),
+    client.order_temp[callback.from_user.id] = {
+        "codigo": codigo,
+        "nombre_serv": serv.get("nombre"),
+        "id_api": serv.get("id_proveedor"),
+        "costo": costo,
+        "precio_unitario": precio,
+        "ganancia": ganancia,
+        "minimo": minimo,
+        "maximo": maximo,
         "step": "link"
     }
 
-    await callback.message.edit_text("📎 Send the **link** where you want the service delivered:")
+    texto = f"""📦 **{serv.get('nombre')}**
+💵 Precio: {precio:.4f} {MONEDA} / cada 1000
+📊 Cantidad mínima: {minimo}
+📊 Cantidad máxima: {maximo}
+
+📎 Envía el enlace donde aplicar el servicio:"""
+    await callback.message.edit_text(texto)
     await callback.answer()
 
 # ============================================================
-# Handle order steps (link -> quantity -> confirm)
+# Proceso de pedido paso a paso
 # ============================================================
 async def handle_order_steps(client: Client, message: Message):
     init_temp(client)
-    user_id = message.from_user.id
-    user_order = client.order_temp.get(user_id)
-    if not user_order:
+    uid = message.from_user.id
+    if uid not in client.order_temp:
         return
 
-    step = user_order.get("step")
-    text = _extract_message_text(message)
+    pedido = client.order_temp[uid]
+    paso = pedido.get("step")
+    texto = _extract_message_text(message)
 
-    if step == "link":
-        if not text:
-            return await message.reply("📎 Please send the **link** where you want the service applied.")
-        user_order["link"] = text
-        user_order["step"] = "qty"
-        await message.reply("🔢 Now send **quantity** you want:")
-        return
+    # Verificar si tiene pedido pendiente
+    usuario = await users.find_one({"_id": uid})
+    if usuario and usuario.get("tiene_pedido_pendiente"):
+        return await message.reply(f"⏳ Debes esperar {TIEMPO_ESPERA_PEDIDO} horas o hasta que se confirme tu último pedido.")
 
-    if step == "qty":
-        qty_text = text.replace(",", "").strip()
-        if not qty_text.isdigit():
-            return await message.reply("❌ Quantity must be a number. Send again:")
-        user_order["qty"] = int(qty_text)
-        user_order["step"] = "confirm"
-        user_order["created_at"] = datetime.utcnow().isoformat()
+    if paso == "link":
+        if not texto or tiene_prohibido(texto):
+            return await message.reply("❌ Enlace no válido o contiene palabras prohibidas. Intenta nuevamente:")
+        pedido["link"] = texto
+        pedido["step"] = "cantidad"
+        return await message.reply(f"🔢 Ingresa la cantidad (entre {pedido['minimo']} y {pedido['maximo']}):")
 
-        # Calculate total price
-        qty = user_order.get("qty", 0)
-        unit_price_user = float(user_order.get("rate_user", 0))  # your selling price
-        total_price = (qty / 1000) * unit_price_user  # total price user will pay
+    if paso == "cantidad":
+        if not texto.isdigit():
+            return await message.reply("❌ Escribe solo números:")
+        cantidad = int(texto)
+        if not (pedido["minimo"] <= cantidad <= pedido["maximo"]):
+            return await message.reply(f"❌ La cantidad debe ser entre {pedido['minimo']} y {pedido['maximo']}:")
+        pedido["cantidad"] = cantidad
+        total = (cantidad / 1000) * pedido["precio_unitario"]
+        pedido["total"] = round(total, 4)
+        pedido["step"] = "confirmar"
 
-        await message.reply(
-            "🧾 Confirm your order:\n\n"
-            f"🔹 Service: {user_order.get('service_name')}\n"
-            f"🔹 Link: {user_order.get('link')}\n"
-            f"🔹 Quantity: {qty}\n"
-            f"🔹 Total price: {total_price:.4f} coins\n\nProceed?",
+        return await message.reply(
+            f"""🧾 **CONFIRMACIÓN DE PEDIDO**
+
+📦 Servicio: {pedido['nombre_serv']}
+🔗 Enlace: {pedido['link']}
+🔢 Cantidad: {cantidad}
+💵 Total: {pedido['total']} {MONEDA}
+
+¿Todo correcto?""",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✔ Confirm", callback_data="confirm_order")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_order")]
+                [InlineKeyboardButton("✅ Confirmar", callback_data="conf_pedido")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="canc_pedido")]
             ])
         )
-        return
-
 
 # ============================================================
-# Confirm order
+# Confirmar pedido
 # ============================================================
-async def cb_confirm_order(client: Client, callback: CallbackQuery):
-    init_temp(client)
-    user_id = callback.from_user.id
-    order = client.order_temp.get(user_id)
-    if not order or order.get("step") != "confirm":
-        return await callback.answer("Session expired!", show_alert=True)
+async def cb_confirmar_pedido(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in client.order_temp:
+        return await callback.answer("❌ Sesión expirada", show_alert=True)
 
-    qty = order.get("qty", 0)
-    unit_price_api = float(order.get("rate_api", 0))
-    unit_price_user = float(order.get("rate_user", 0))
-    price = (qty / 1000) * unit_price_user
+    pedido = client.order_temp[uid]
+    saldo = await check_balance(uid)
 
-    # Check user balance
-    user_data = await users.find_one({"_id": user_id})
-    balance = float(user_data.get("balance", 0)) if user_data else 0
-    if balance < price:
+    if saldo < pedido["total"]:
         return await callback.answer(
-            f"❌ Not enough balance!\nRequired: {price:.4f}\nYour balance: {balance}",
+            f"❌ Saldo insuficiente\nFaltan: {round(pedido['total'] - saldo, 4)} {MONEDA}",
             show_alert=True
         )
 
-    await users.update_one({"_id": user_id}, {"$inc": {"balance": -price}})
+    # Descontar saldo
+    await users.update_one({"_id": uid}, {"$inc": {"balance": -pedido["total"]}})
+    await estado_pedido_usuario(uid, True)
 
-    payload = {
-        "key": SMM_SITE["api_key"],
-        "action": "add",
-        "service": order.get("service_id"),
-        "link": order.get("link"),
-        "quantity": qty
-    }
-    api_order_id = 0
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(SMM_SITE["api_url"], data=payload) as resp:
-                res = await resp.json()
-                api_order_id = res.get("order", 0)
-    except Exception as e:
-        print("Order Error:", e)
+    # Enviar a proveedor
+    respuesta_api = {"order": None, "error": None}
+    for url, key in [(SMM_SITE["api_url"], SMM_SITE["api_key"]), (SMM_SITE["api_url_secundario"], SMM_SITE["api_key_secundario"])]:
+        if not url or not key:
+            continue
+        try:
+            payload = {
+                "key": key, "action": "add",
+                "service": pedido["id_api"],
+                "link": pedido["link"],
+                "quantity": pedido["cantidad"]
+            }
+            async with aiohttp.ClientSession() as s:
+                async with s.post(url, data=payload) as r:
+                    res = await r.json()
+                    if "order" in res:
+                        respuesta_api["order"] = res["order"]
+                        break
+                    elif "error" in res:
+                        respuesta_api["error"] = res["error"]
+        except Exception as e:
+            respuesta_api["error"] = str(e)
 
-    await create_order(
-        user_id=user_id,
-        service_id=order.get("service_id"),
-        link=order.get("link"),
-        quantity=qty,
-        amount=price,
-        api_order_id=api_order_id
+    # Guardar en base
+    nuevo = await create_order(
+        user_id=uid,
+        service_id=pedido["codigo"],
+        link=pedido["link"],
+        quantity=pedido["cantidad"],
+        amount=pedido["total"],
+        costo=pedido["costo"],
+        ganancia=pedido["ganancia"],
+        api_order_id=respuesta_api.get("order")
     )
 
+    await actualizar_gasto_usuario(uid, pedido["total"])
+    await log_accion("Pedido creado", f"Usuario {uid} - {pedido['nombre_serv']}")
+
+    # Avisar a canal
     try:
         await client.send_message(
             ORDER_CHANNEL,
-            f"📦 **New Order**\n"
-            f"👤 User: {callback.from_user.first_name} ({user_id})\n"
-            f"🛒 Service: {order.get('service_name')}\n"
-            f"🔗 Link: {order.get('link')}\n"
-            f"📌 Quantity: {qty}\n"
-            f"💰 Price: {price:.4f} coins\n"
-            f"🧾 API Order ID: {api_order_id}"
+            f"""📦 **NUEVO PEDIDO**
+👤 Usuario: {callback.from_user.first_name} | {uid}
+📦 Servicio: {pedido['nombre_serv']}
+🔗 Enlace: {pedido['link']}
+🔢 Cantidad: {pedido['cantidad']}
+💵 Total: {pedido['total']} {MONEDA}
+🆔 ID Proveedor: {respuesta_api.get('order', 'Falló')}"""
         )
-    except Exception as e:
-        print("ORDER_CHANNEL Error:", e)
+    except:
+        pass
 
-    await callback.message.edit_text(
-        "🎉 Order placed successfully!",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅ Back to Services", callback_data="cb_services")]
-        ])
-    )
+    # Mensaje al usuario
+    texto_final = "✅ Pedido realizado correctamente"
+    if respuesta_api.get("error"):
+        texto_final = f"⚠️ Pedido guardado, hubo problema al conectar con el proveedor: {respuesta_api['error']}"
 
-    if user_id in client.order_temp:
-        del client.order_temp[user_id]
-
-    await callback.answer("✅ Order placed!")
-
-# ============================================================
-# Cancel order
-# ============================================================
-async def cb_cancel_order(client: Client, callback: CallbackQuery):
-    init_temp(client)
-    user_id = callback.from_user.id
-    if user_id in client.order_temp:
-        del client.order_temp[user_id]
-    await callback.message.edit_text("❌ Order canceled.")
+    await callback.message.edit_text(texto_final)
+    del client.order_temp[uid]
     await callback.answer()
 
 # ============================================================
-# Register handlers
+# Cancelar pedido
+# ============================================================
+async def cb_cancelar_pedido(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid in client.order_temp:
+        del client.order_temp[uid]
+    await callback.message.edit_text("❌ Pedido cancelado")
+    await callback.answer()
+
+# ============================================================
+# Registrar todo
 # ============================================================
 def register_services_handlers(app: Client):
     init_temp(app)
 
     @app.on_callback_query(filters.regex("^cb_services$"))
-    async def _cb_services(c, q):
-        await cb_services(c, q)
+    async def _1(c,q): await cb_services(c,q)
 
-    @app.on_callback_query(filters.regex("^service_(reaction|members|views)$"))
-    async def _cb_service_select(c, q):
-        await cb_service_select(c, q)
+    @app.on_callback_query(filters.regex(r"^cat_.+"))
+    async def _2(c,q): await cb_ver_categoria(c,q)
 
-    @app.on_callback_query(filters.regex(r"^order_(reaction|members|views)_\d+$"))
-    async def _cb_order_package(c, q):
-        await cb_order_package(c, q)
+    @app.on_callback_query(filters.regex(r"^serv_.+"))
+    async def _3(c,q): await cb_seleccionar_servicio(c,q)
 
-    @app.on_callback_query(filters.regex("^confirm_order$"))
-    async def _cb_confirm(c, q):
-        await cb_confirm_order(c, q)
+    @app.on_callback_query(filters.regex("^conf_pedido$"))
+    async def _4(c,q): await cb_confirmar_pedido(c,q)
 
-    @app.on_callback_query(filters.regex("^cancel_order$"))
-    async def _cb_cancel(c, q):
-        await cb_cancel_order(c, q)
+    @app.on_callback_query(filters.regex("^canc_pedido$"))
+    async def _5(c,q): await cb_cancelar_pedido(c,q)
 
     @app.on_message(filters.private & ~filters.command("start"))
-    async def _handle_order_steps(c: Client, m: Message):
-        await handle_order_steps(c, m)
+    async def _pasos(c,m): await handle_order_steps(c,m)
 
-    print("✅ Service handlers loaded")
+    print("✅ Módulo de Servicios cargado correctamente")
